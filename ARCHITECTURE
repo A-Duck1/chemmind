@@ -1,0 +1,290 @@
+# ChemMind - System Architecture
+
+> Version: 0.2.1
+> Last updated: 2026-04-28
+> Author: Li Changxin (UPC Chemical Engineering)
+
+---
+
+## 1. High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ChemMind System                          │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
+│  │  CLI / UI   │  │  API Server │  │  Jupyter     │       │
+│  │  (Click)    │  │  (FastAPI)  │  │  Notebook   │       │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘       │
+│         │                │                │                │
+│         └────────────────┴────────────────┘                │
+│                            ↓                                 │
+│              ┌─────────────────────────┐                   │
+│              │      Core Engine          │                   │
+│              │  • ReAct Agent (LangGraph)                  │
+│              │  • Function Calling     │                   │
+│              │  • Memory Management    │                   │
+│              └────────────┬────────────┘                   │
+│                           ↓                                 │
+│      ┌────────────────────┴────────────────────┐           │
+│      │         Module Layer                      │           │
+│      ├─────────────────────────────────────────┤           │
+│      │  ChemRAG  │  SynthFlow  │  CompChem  │  AutoLab│
+│      └────────────────────┬────────────────────┘           │
+│                           ↓                                 │
+│              ┌─────────────────────────┐                   │
+│              │     Knowledge Layer      │                   │
+│              │  • Vector DB (Chroma) │                   │
+│              │  • Reaction DB         │                   │
+│              │  • Spectral Lib        │                   │
+│              └─────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. Module Details
+
+### 2.1 ChemRAG (Literature Assistant)
+
+```
+Input: PDF file path
+  ↓
+[PDF Parser] (PyMuPDF)
+  → Extract text, figures, tables
+  ↓
+[ChemFig Extractor]
+  → Recognize chemical structures (SMILES, InChI)
+  ↓
+[Chunker]
+  → Split into 512-token chunks (with overlap)
+  ↓
+[Vector Store] (ChromaDB)
+  → Embed chunks (all-MiniLM-L6-v2)
+  → Store with metadata
+  ↓
+[Retriever] (Hybrid: Dense + Sparse)
+  → Query: user question
+  → Top-K chunks (K=5)
+  ↓
+[LLM Summarizer] (Claude Sonnet)
+  → Generate structured summary
+  ↓
+Output: JSON (summary, reactions, data tables)
+```
+
+**Token Flow:**
+- Input: 15k-80k tokens (1-10 pages)
+- Output: 2k-5k tokens (summary)
+- RAG retrieval: 10k tokens (Top-5 chunks × 2k each)
+
+---
+
+### 2.2 SynthFlow (Synthesis Designer)
+
+```
+Input: Target molecule (SMILES)
+  ↓
+[Retrosynthesizer] (RDKit BRICS)
+  → Generate 1-step disconnections
+  → Recursively apply (max depth=5)
+  ↓
+[Route Expander]
+  → Generate 3-5 candidate routes
+  ↓
+[Route Ranker]
+  → Score routes by:
+    • Step count (lower = better)
+    • Reagent cost (lower = better)
+    • Yield estimate (higher = better)
+  ↓
+[Condition Recommender] (LLM)
+  → For each step, recommend:
+    • Solvent
+    • Temperature
+    • Catalyst
+    • Reaction time
+  ↓
+[Safety Checker]
+  → Check for:
+    • Toxic reagents
+    • Explosive intermediates
+    • High-pressure/temperature
+  ↓
+Output: Ranked routes (JSON)
+```
+
+**Token Flow:**
+- Input: 12k-18k tokens (molecule + database info)
+- Output: 3k-5k tokens (routes + conditions)
+
+---
+
+### 2.3 CompChem (Computational Interpreter)
+
+```
+Input: Calculation output file (MS/VASP/Gaussian)
+  ↓
+[Parser]
+  → Extract:
+    • Calculation parameters (functional, basis set)
+    • Raw data (band energies, DOS values)
+  ↓
+[Analyzer]
+  → Compute:
+    • Band gap (direct/indirect, at which k-point)
+    • Effective masses (electron/hole)
+    • DOS peaks (which orbitals)
+  ↓
+[LLM Interpreter]
+  → Generate natural language report:
+    • Is this material suitable for photocatalysis?
+    • Why is the band gap overestimated?
+    • How to improve the calculation?
+  ↓
+Output: Markdown report
+```
+
+**Token Flow:**
+- Input: 22k-28k tokens (MS XML / VASP OUTCAR)
+- Output: 6k-9k tokens (report)
+
+---
+
+### 2.4 AutoLab (Report Generator)
+
+```
+Input: Experimental data (CSV)
+  ↓
+[Data Cleaner]
+  → Handle missing values
+  → Remove outliers (3σ rule)
+  ↓
+[Statistical Analyzer]
+  → Compute: mean, std, p-value (t-test)
+  → ANOVA (if multi-group)
+  ↓
+[Plotter] (Matplotlib)
+  → Generate figures:
+    • Scatter (yield vs T)
+    • Bar (yield by catalyst)
+    • Heatmap (param sweep)
+  ↓
+[Report Assembler]
+  → Fill LaTeX/Word template:
+    • 1. Introduction (LLM-generated)
+    • 2. Methods (template + user input)
+    • 3. Results (data + figures)
+    • 4. Discussion (LLM-generated)
+    • 5. Conclusion (LLM-generated)
+  ↓
+Output: PDF (via LaTeX) or DOCX (via python-docx)
+```
+
+**Token Flow:**
+- Input: 5k-8k tokens (data summary + template)
+- Output: 1k-2k tokens (introduction/discussion)
+
+---
+
+## 3. Data Flow Examples
+
+### 3.1 Full Pipeline: "Analyze papers → Design experiment → Interpret results → Write report"
+
+```
+User: "I want to design a photocatalyst for CO2 reduction."
+
+1. ChemRAG: Analyze 5 recent papers (→ 250k tokens)
+   → Summary: "Cu-based catalysts with N-doped graphene supports show 
+      promising activity (90% selectivity to CH4)."
+
+2. SynthFlow: Design synthesis route for Cu/N-graphene
+   → Recommended route: Cu(NO3)2 + graphene oxide → hydrothermal → 
+      reduction (→ 50k tokens)
+
+3. CompChem: Interpret DFT results of Cu cluster
+   → "The d-band center is -2.1 eV, suitable for CO2 activation." 
+      (→ 30k tokens)
+
+4. AutoLab: Generate report (→ 20k tokens)
+
+Total: ~350k tokens (single run)
+With MiMo 1M context → can process 20+ papers in one go!
+```
+
+---
+
+## 4. Technology Choices
+
+### 4.1 Why LangChain?
+
+- **Agent framework:** ReAct implementation is robust
+- **Tool integration:** Easy to add new tools (e.g., Reaxys API)
+- **Memory:** Built-in conversation memory (buffer + summary)
+
+### 4.2 Why ChromaDB?
+
+- **Local first:** No need for cloud DB (privacy for unpublished results)
+- **Fast:** <100ms retrieval for 10k+ vectors
+- **Integration:** Native support in LangChain
+
+### 4.3 Why RDKit over Other Tools?
+
+- **Open-source:** Free for academic/commercial use
+- **Python-native:** Easy to integrate with LLM outputs
+- **BRICS:** Proven algorithm for retrosynthesis
+
+### 4.4 Why Claude over GPT-4?
+
+- **Long context:** 200k tokens (vs GPT-4's 128k)
+- **JSON mode:** Reliable structured output
+- **Cost:** $3/M input (vs GPT-4's $10/M)
+
+---
+
+## 5. Scalability Plan
+
+### 5.1 Short-term (3 months)
+
+- **Problem:** LLM calls are slow (2-5s per call)
+- **Solution:** Batch API (Anthropic supports up to 100 requests/batch)
+
+### 5.2 Medium-term (6 months)
+
+- **Problem:** ChromaDB struggles with 100k+ vectors
+- **Solution:** Migrate to Milvus or Weaviate (distributed vector DB)
+
+### 5.3 Long-term (12 months)
+
+- **Problem:** API costs too high for daily use
+- **Solution:** Fine-tune open-source model (Mistral 7B) on 
+  chemistry corpus (generated by Claude)
+
+---
+
+## 6. Security & Privacy
+
+### 6.1 Data Storage
+
+- **Local only:** All uploaded PDFs stored locally
+- **No cloud:** ChromaDB runs locally
+- **API only:** LLM calls go to Anthropic/OpenAI (no data stored by them)
+
+### 6.2 API Key Security
+
+- **.env file:** Never committed to Git
+- **User-specific:** Each user has their own API key
+- **No logging:** ChemMind does not log API keys
+
+---
+
+## 7. Acknowledgments
+
+This architecture is inspired by:
+- **LangChain Official Tutorials** (agent design)
+- **RDKit Documentation** (BRICS algorithm)
+- **ChromaDB Examples** (RAG best practices)
+
+---
+
+**End of Architecture Documentation**
